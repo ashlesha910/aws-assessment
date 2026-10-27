@@ -1,0 +1,27 @@
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Build artifacts
+*.zip
+dist/
+build/
+
+# Env & secrets (never commit)
+.env
+.env.*
+*.pem
+
+# OS / editor
+.DS_Store
+*.swp

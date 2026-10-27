@@ -1,0 +1,74 @@
+name: Infrastructure (CloudFormation)
+
+# REQUIREMENT #4: Infrastructure changes follow a SEPARATE process.
+# This workflow ONLY runs when files under infrastructure/** change.
+# Application pushes never trigger it, so app deploys cannot alter infra.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infrastructure/**"
+      - ".github/workflows/infra.yml"
+  pull_request:
+    paths:
+      - "infrastructure/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [dev, staging, prod]
+        default: dev
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+jobs:
+  validate:
+    name: Validate & lint templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+      - name: Lint CloudFormation templates
+        run: cfn-lint infrastructure/templates/*.yaml
+
+  # On PRs we only produce a change set preview (never mutate infra).
+  plan:
+    name: Change set preview (dev)
+    if: github.event_name == 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_INFRA_ROLE_ARN_DEV }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Validate network template (example change set)
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://infrastructure/templates/01-network.yaml
+
+  deploy:
+    name: Deploy infrastructure
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    env:
+      ENV: ${{ github.event.inputs.environment || 'dev' }}
+      GITHUB_ORG: ${{ github.repository_owner }}
+      GITHUB_REPO: ${{ github.event.repository.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_INFRA_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy all infrastructure stacks
+        run: |
+          chmod +x infrastructure/scripts/deploy-infra.sh
+          infrastructure/scripts/deploy-infra.sh "$ENV" "${{ vars.AWS_REGION }}"

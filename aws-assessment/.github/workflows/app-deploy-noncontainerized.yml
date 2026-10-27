@@ -1,0 +1,91 @@
+name: App Deploy (Non-Containerized / EB + S3)
+
+# Second deployment approach, application-only (no infra changes).
+# Backend  -> Elastic Beanstalk application version + environment update.
+# Frontend -> Next.js static export synced to S3 + CloudFront invalidation.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, staging, prod]
+        default: dev
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - ".github/workflows/app-deploy-noncontainerized.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ENV: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  deploy-backend-eb:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r apps/backend/requirements.txt pytest
+      - run: cd apps/backend && pytest -q
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package backend bundle
+        run: |
+          cd apps/backend
+          zip -r "../../backend-${GITHUB_SHA::8}.zip" . -x '*.pyc' '__pycache__/*'
+
+      - name: Upload & deploy Elastic Beanstalk version
+        run: |
+          BUCKET="${ENV}-frontend-site-$(aws sts get-caller-identity --query Account --output text)"
+          APP="${ENV}-backend-eb"
+          ENVNAME="${ENV}-backend"
+          VERSION="${GITHUB_SHA::8}"
+          aws s3 cp "backend-${VERSION}.zip" "s3://${BUCKET}/eb/backend-${VERSION}.zip"
+          aws elasticbeanstalk create-application-version \
+            --application-name "$APP" \
+            --version-label "$VERSION" \
+            --source-bundle S3Bucket="$BUCKET",S3Key="eb/backend-${VERSION}.zip"
+          aws elasticbeanstalk update-environment \
+            --environment-name "$ENVNAME" \
+            --version-label "$VERSION"
+
+  deploy-frontend-s3:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build static export
+        run: |
+          cd apps/frontend
+          npm ci || npm install
+          BUILD_TARGET=static npm run build
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3 and invalidate CloudFront
+        run: |
+          BUCKET=$(aws cloudformation list-exports \
+            --query "Exports[?Name=='${ENV}-NC-FrontendBucket'].Value" --output text)
+          DIST=$(aws cloudformation list-exports \
+            --query "Exports[?Name=='${ENV}-NC-CloudFrontId'].Value" --output text)
+          aws s3 sync apps/frontend/out "s3://${BUCKET}" --delete
+          aws cloudfront create-invalidation \
+            --distribution-id "$DIST" --paths "/*"

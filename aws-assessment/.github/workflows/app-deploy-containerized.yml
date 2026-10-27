@@ -1,0 +1,114 @@
+name: App Deploy (Containerized / ECS)
+
+# REQUIREMENT #4: Application code changes trigger ONLY application deployment.
+# Scoped to apps/**; it builds images and updates the ECS service via a new
+# task-definition revision. It NEVER runs CloudFormation, so infra is untouched.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - ".github/workflows/app-deploy-containerized.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, staging, prod]
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ENV: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  # ---------- CI: test both apps ----------
+  test-backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q
+
+  test-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci || npm install
+      - run: npm run build
+
+  # ---------- CD: build, push, deploy ----------
+  deploy:
+    needs: [test-backend, test-frontend]
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve ECR repo URIs
+        id: repos
+        run: |
+          FE=$(aws cloudformation list-exports \
+            --query "Exports[?Name=='${ENV}-FrontendRepoUri'].Value" --output text)
+          BE=$(aws cloudformation list-exports \
+            --query "Exports[?Name=='${ENV}-BackendRepoUri'].Value" --output text)
+          echo "frontend=$FE" >> "$GITHUB_OUTPUT"
+          echo "backend=$BE" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push frontend image
+        run: |
+          IMG="${{ steps.repos.outputs.frontend }}:${GITHUB_SHA::8}"
+          docker build -t "$IMG" apps/frontend
+          docker push "$IMG"
+          echo "FE_IMG=$IMG" >> "$GITHUB_ENV"
+
+      - name: Build & push backend image
+        run: |
+          IMG="${{ steps.repos.outputs.backend }}:${GITHUB_SHA::8}"
+          docker build -t "$IMG" apps/backend
+          docker push "$IMG"
+          echo "BE_IMG=$IMG" >> "$GITHUB_ENV"
+
+      # Register a NEW task definition revision pointing at the new image and
+      # update the service. This is an application-only change - no CFN deploy.
+      - name: Deploy frontend to ECS
+        run: |
+          CLUSTER="${ENV}-cluster"
+          bash infrastructure/scripts/update-ecs-service.sh \
+            "$CLUSTER" "${ENV}-frontend" frontend "$FE_IMG" "$AWS_REGION"
+
+      - name: Deploy backend to ECS
+        run: |
+          CLUSTER="${ENV}-cluster"
+          bash infrastructure/scripts/update-ecs-service.sh \
+            "$CLUSTER" "${ENV}-backend" backend "$BE_IMG" "$AWS_REGION"
+
+      - name: Wait for services to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster "${ENV}-cluster" \
+            --services "${ENV}-frontend" "${ENV}-backend"

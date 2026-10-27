@@ -1,0 +1,14 @@
+{
+  "EnvironmentName": "dev",
+  "VpcCidr": "10.0.0.0/16",
+  "SingleNatGateway": "true",
+  "DBInstanceClass": "db.t3.micro",
+  "DBAllocatedStorage": "20",
+  "MultiAZ": "false",
+  "BackupRetentionDays": "1",
+  "FrontendDesiredCount": "1",
+  "BackendDesiredCount": "1",
+  "TaskCpu": "256",
+  "TaskMemory": "512",
+  "InstanceType": "t3.small"
+}

@@ -1,0 +1,14 @@
+{
+  "EnvironmentName": "staging",
+  "VpcCidr": "10.1.0.0/16",
+  "SingleNatGateway": "true",
+  "DBInstanceClass": "db.t3.small",
+  "DBAllocatedStorage": "20",
+  "MultiAZ": "false",
+  "BackupRetentionDays": "7",
+  "FrontendDesiredCount": "2",
+  "BackendDesiredCount": "2",
+  "TaskCpu": "512",
+  "TaskMemory": "1024",
+  "InstanceType": "t3.small"
+}

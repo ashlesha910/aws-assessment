@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Database stack - RDS PostgreSQL (Multi-AZ in prod) with credentials stored in
+  AWS Secrets Manager and automatic rotation-ready configuration. INFRASTRUCTURE stack.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+  DBName:
+    Type: String
+    Default: appdb
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+  DBMaxAllocatedStorage:
+    Type: Number
+    Default: 100
+  EngineVersion:
+    Type: String
+    Default: "16.3"
+  MultiAZ:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+
+Conditions:
+  IsProd: !Equals [!Ref EnvironmentName, prod]
+
+Resources:
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${EnvironmentName} DB subnet group (private subnets)"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet1"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet2"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-db-subnet-group"
+
+  # Secrets Manager generates and stores the master password - never in templates/plaintext.
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${EnvironmentName}/database/credentials"
+      Description: !Sub "${EnvironmentName} RDS PostgreSQL master credentials"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "dbadmin"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\ '
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-postgres"
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      MaxAllocatedStorage: !Ref DBMaxAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-DatabaseSecurityGroupId"
+      MultiAZ: !If [IsProd, true, !Ref MultiAZ]
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      DeletionProtection: !If [IsProd, true, false]
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      EnableCloudwatchLogsExports:
+        - postgresql
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Attach the DB endpoint/port to the secret so apps resolve one secret for everything.
+  DBSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DBSecret
+      TargetId: !Ref Database
+      TargetType: AWS::RDS::DBInstance
+
+Outputs:
+  DBEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+    Export:
+      Name: !Sub "${EnvironmentName}-DBEndpoint"
+  DBPort:
+    Value: !GetAtt Database.Endpoint.Port
+    Export:
+      Name: !Sub "${EnvironmentName}-DBPort"
+  DBSecretArn:
+    Value: !Ref DBSecret
+    Export:
+      Name: !Sub "${EnvironmentName}-DBSecretArn"
+  DBName:
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${EnvironmentName}-DBName"

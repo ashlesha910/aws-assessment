@@ -1,0 +1,14 @@
+{
+  "EnvironmentName": "prod",
+  "VpcCidr": "10.2.0.0/16",
+  "SingleNatGateway": "false",
+  "DBInstanceClass": "db.r6g.large",
+  "DBAllocatedStorage": "100",
+  "MultiAZ": "true",
+  "BackupRetentionDays": "30",
+  "FrontendDesiredCount": "3",
+  "BackendDesiredCount": "3",
+  "TaskCpu": "1024",
+  "TaskMemory": "2048",
+  "InstanceType": "t3.medium"
+}
